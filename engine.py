@@ -266,6 +266,23 @@ UNSUITABLE_KEYWORDS = [
     "定期开放", "定开", "封闭",          # 流动性锁死
     "保本", "避险",                      # 收益太低
 ]
+# 品质过滤：策略复杂或资产类别不适合
+QUALITY_FILTER_KEYWORDS = [
+    "量化", "对冲",                      # 策略复杂
+    "打新", "战略配售",                  # 小众策略
+    "灵活配置",                          # 策略不透明
+    "科创板", "北交所", "新三板",        # 单一高波动板块
+    "黄金", "原油", "商品", "资源",      # 另类资产
+    "可转债", "可交换",                  # 介于股债之间
+]
+
+
+def prefilter_by_name(code, info):
+    """
+    0 成本预筛（只用基金名称和类型，不拉网络）
+    返回: (keep: bool, reason: str)
+    """
+    name = info.get("name", "")
 
 
 def prefilter_by_name(code, info):
@@ -691,10 +708,11 @@ def run_matching(user_profile, limit=15):
         "excluded_type": 0,
         "excluded_share": 0,
         "excluded_structure": 0,
+        "excluded_quality": 0,
         "excluded_type_detail": {},
     }
 
-    eligible_types = ["混合型", "股票型", "指数型", "QDII"]
+    eligible_types = ["混合型-偏股", "股票型", "指数型-股票"]
     candidates = {}
     for code, info in all_funds.items():
         ftype = info.get("type", "")
@@ -709,13 +727,21 @@ def run_matching(user_profile, limit=15):
             stats["excluded_type_detail"][ftype] = stats["excluded_type_detail"].get(ftype, 0) + 1
 
         if keep:
-            # 名称预筛
+            # 名称预筛（份额 + 结构）
             keep, reason = prefilter_by_name(code, info)
             if not keep:
                 if "份额" in reason:
                     stats["excluded_share"] += 1
                 else:
                     stats["excluded_structure"] += 1
+
+        if keep:
+            # 品质预筛（策略复杂 / 另类资产）
+            for kw in QUALITY_FILTER_KEYWORDS:
+                if kw in info.get("name", ""):
+                    keep = False
+                    stats["excluded_quality"] += 1
+                    break
 
         if keep:
             candidates[code] = info
@@ -765,7 +791,7 @@ def run_matching(user_profile, limit=15):
     total_candidates = len(candidates)
 
     print(f"  全市场: {total_all} → 预筛后: {total_candidates} 只")
-    print(f"  (排除: 类型{stats['excluded_type']} + 份额{stats['excluded_share']} + 结构{stats['excluded_structure']} + 偏好{stats['excluded_pref']})")
+    print(f"  (排除: 类型{stats['excluded_type']} + 份额{stats['excluded_share']} + 结构{stats['excluded_structure']} + 品质{stats['excluded_quality']} + 偏好{stats['excluded_pref']})")
 
     if not candidates:
         print("[错误] 预筛后无候选基金")
@@ -785,8 +811,16 @@ def run_matching(user_profile, limit=15):
     now_ts = time.time()
     failed_codes = {k: v for k, v in failed_codes.items() if now_ts - v < 172800}
 
-    # ---- 两级拉取：缓存优先 ----
+    # ---- 智能抽样：优先老基金，保证 60 秒内出结果 ----
+    MAX_SCAN = 1800  # 15 线程 × 0.5 秒 × 1800 = 60 秒
     codes = list(candidates.keys())
+    if len(codes) > MAX_SCAN:
+        # 老基金优先（代码越小越老），剩余随机补齐
+        codes_sorted = sorted(codes, key=lambda c: int(c) if c.isdigit() else 999999)
+        codes = codes_sorted[:MAX_SCAN] + random.sample(codes_sorted[MAX_SCAN:], min(200, len(codes_sorted) - MAX_SCAN))
+        print(f"  候选超出 {MAX_SCAN}，智能抽样至 {len(codes)} 只（优先老基金）")
+
+    # ---- 两级拉取：缓存优先 ----
     cached_codes = []
     uncached_codes = []
 
