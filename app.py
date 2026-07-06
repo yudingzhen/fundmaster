@@ -8,6 +8,9 @@ import sys, os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from main import build_profile
+from engine import run_matching as do_match, load_fund_list
+
 st.set_page_config(
     page_title="基金匹配器",
     page_icon="🏦",
@@ -245,20 +248,24 @@ def run():
 
         if current >= len(QUESTIONS):
             # 完成问卷 → 运行匹配
-            with st.spinner("正在全市场匹配..."):
-                raw = st.session_state.answers
-                from main import build_profile
-                profile = build_profile(raw)
-                warnings = profile.pop("_warnings", [])
+            try:
+                with st.spinner("正在全市场匹配（首次约需 1 分钟）..."):
+                    raw = st.session_state.answers
+                    profile = build_profile(raw)
+                    warnings = profile.pop("_warnings", [])
 
-                from engine import run_matching as do_match
-                results, stats = do_match(profile, limit=10)
+                    results, stats = do_match(profile, limit=10)
 
-                st.session_state.results = results
-                st.session_state.stats = stats
-                st.session_state.profile = profile
-                st.session_state.warnings = warnings
-            st.rerun()
+                    st.session_state.results = results
+                    st.session_state.stats = stats
+                    st.session_state.profile = profile
+                    st.session_state.warnings = warnings
+                st.rerun()
+            except Exception as e:
+                st.error(f"匹配过程出错：{e}")
+                st.info("可能是网络不稳定或数据源暂时不可用，请稍后重试。")
+                if st.button("🔄 重试"):
+                    st.rerun()
 
         q_text, q_options, q_key = QUESTIONS[current]
 
