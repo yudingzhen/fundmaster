@@ -11,6 +11,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 from main import build_profile
 from engine import run_matching as do_match, load_fund_list
 
+
+@st.cache_resource
+def warmup_cache():
+    """预热：启动时加载基金列表到缓存，只跑一次"""
+    try:
+        load_fund_list(force_refresh=True)
+    except Exception:
+        pass
+    return True
+
 st.set_page_config(
     page_title="基金匹配器",
     page_icon="🏦",
@@ -229,6 +239,9 @@ MULTI_SELECT_KEYS = {"money_mission", "preferred_sectors", "excludes"}
 
 
 def run():
+    # ---- 预热缓存 ----
+    _ = warmup_cache()
+
     # ---- 头部 ----
     st.markdown('<div class="brand-id">一入向北</div>', unsafe_allow_html=True)
     st.markdown('<div class="main-header">基金匹配器</div>', unsafe_allow_html=True)
