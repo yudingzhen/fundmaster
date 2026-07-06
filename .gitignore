@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 data/details/
 data/fund_cache.json
+data/failed_codes.json
 output/
 dist/
 build/

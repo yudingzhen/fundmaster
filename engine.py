@@ -4,6 +4,11 @@
 """
 
 import sys, os
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 import requests, json, re, os, math, time, random
 from datetime import datetime, timedelta
@@ -64,7 +69,12 @@ def fetch_fund_detail(code):
     # 从网络获取
     url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
     headers = {"Referer": "http://fund.eastmoney.com/"}
-    r = requests.get(url, headers=headers, timeout=15)
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+    except requests.exceptions.Timeout:
+        return None
+    except requests.exceptions.ConnectionError:
+        return None
     r.encoding = "utf-8"
     text = r.text
 
@@ -710,14 +720,70 @@ def run_matching(user_profile, limit=15):
         if keep:
             candidates[code] = info
 
+    # 偏好预筛：宽基全留，窄基不匹配才砍
+    prefs = user_profile.get("preferred_sectors", [])
+    stats["excluded_pref"] = 0
+    if prefs:
+        # 窄基指数关键词映射
+        narrow_keywords = {
+            "科技": ["科技", "信息", "TMT", "互联网", "5G", "芯片", "半导体", "电子", "AI", "软件", "计算机", "通信"],
+            "消费": ["消费", "白酒", "食品", "饮料", "零售", "家电", "农业"],
+            "医药": ["医药", "医疗", "健康", "生物", "中药", "医械"],
+            "新能源": ["新能源", "光伏", "锂电", "电池", "汽车", "碳中和", "绿色"],
+            "金融": ["金融", "银行", "证券", "保险", "地产"],
+            "港股": ["港股", "沪港通", "深港通", "恒生"],
+            "美股": ["美股", "纳斯达克", "标普", "全球"],
+        }
+        # 宽基指数关键词（全保留）
+        broad_keywords = ["沪深300", "上证50", "中证500", "中证800", "中证1000",
+                          "创业板", "科创50", "科创100", "深证100", "红利"]
+
+        def is_narrow_match(name, prefs):
+            """判断窄基指数是否命中偏好"""
+            for p in prefs:
+                kws = narrow_keywords.get(p, [p])
+                if any(kw in name for kw in kws):
+                    return True
+            return False
+
+        def is_broad(name):
+            return any(kw in name for kw in broad_keywords)
+
+        pre_filtered = {}
+        for code, info in candidates.items():
+            name = info.get("name", "")
+            ftype = info.get("type", "")
+            if "指数" in ftype and not is_broad(name):
+                # 窄基指数 → 必须匹配偏好
+                if not is_narrow_match(name, prefs):
+                    stats["excluded_pref"] += 1
+                    continue
+            pre_filtered[code] = info
+
+        candidates = pre_filtered
+
     total_candidates = len(candidates)
 
     print(f"  全市场: {total_all} → 预筛后: {total_candidates} 只")
-    print(f"  (排除: 类型{stats['excluded_type']} + 份额{stats['excluded_share']} + 结构{stats['excluded_structure']})")
+    print(f"  (排除: 类型{stats['excluded_type']} + 份额{stats['excluded_share']} + 结构{stats['excluded_structure']} + 偏好{stats['excluded_pref']})")
 
     if not candidates:
         print("[错误] 预筛后无候选基金")
         return [], stats
+
+    # ---- 失败名单：48h 内不重试 ----
+    failed_list_path = os.path.join(DATA_DIR, "failed_codes.json")
+    failed_codes = {}
+    if os.path.exists(failed_list_path):
+        try:
+            with open(failed_list_path, "r") as f:
+                failed_codes = json.load(f)
+        except Exception:
+            pass
+
+    # 清理过期失败记录
+    now_ts = time.time()
+    failed_codes = {k: v for k, v in failed_codes.items() if now_ts - v < 172800}
 
     # ---- 两级拉取：缓存优先 ----
     codes = list(candidates.keys())
@@ -726,13 +792,20 @@ def run_matching(user_profile, limit=15):
 
     CACHE_DAYS = 3  # 净值缓存 3 天
     cache_seconds = CACHE_DAYS * 86400
+    skipped_failed = 0
 
     for code in codes:
+        if code in failed_codes:
+            skipped_failed += 1
+            continue
         cache_path = get_detail_path(code)
         if os.path.exists(cache_path) and (time.time() - os.path.getmtime(cache_path)) < cache_seconds:
             cached_codes.append(code)
         else:
             uncached_codes.append(code)
+
+    if skipped_failed:
+        print(f"  跳过 {skipped_failed} 个之前失败的代码")
 
     cache_pct = len(cached_codes) / total_candidates * 100
     print(f"  缓存命中: {len(cached_codes)} 只 ({cache_pct:.0f}%) | 需拉取: {len(uncached_codes)} 只")
@@ -765,7 +838,10 @@ def run_matching(user_profile, limit=15):
             except Exception:
                 return code, None
 
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        cpu_count = os.cpu_count() or 4
+        workers = min(20, max(5, cpu_count * 2))
+        failed_list = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(fetch_one, code): code for code in uncached_codes}
             for future in as_completed(futures):
                 completed += 1
@@ -777,8 +853,10 @@ def run_matching(user_profile, limit=15):
                         counters["success"] += 1
                     else:
                         counters["fail"] += 1
+                        failed_list.append(code)
                 except Exception:
                     counters["fail"] += 1
+                    failed_list.append(code)
                 if completed % 500 == 0 or completed == total_fetch:
                     elapsed = time.time() - start_time
                     rate = completed / elapsed if elapsed > 0 else 0
@@ -786,6 +864,16 @@ def run_matching(user_profile, limit=15):
                     print(f"    拉取: {completed}/{total_fetch} | {elapsed:.0f}秒 | 剩余~{eta:.0f}秒", end="\r")
 
         print(f"\n    拉取完成: 成功 {counters['success']} + 失败 {counters['fail']} (代码不存在或已清盘)")
+
+        # 保存失败名单
+        new_fails = {c: now_ts for c in failed_list if c not in failed_codes}
+        if new_fails:
+            failed_codes.update(new_fails)
+            try:
+                with open(failed_list_path, "w") as f:
+                    json.dump(failed_codes, f)
+            except Exception:
+                pass
 
     # ---- 第二阶段：顺序评分 ----
     print(f"  正在评分...")

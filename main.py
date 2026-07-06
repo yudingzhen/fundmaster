@@ -10,6 +10,13 @@
 
 import sys, os, json, time, webbrowser
 
+# 修复 exe 版在 Windows CMD 下的乱码问题
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        os.system("chcp 65001 > nul")
+
 from engine import run_matching, load_fund_list, DATA_DIR
 from datetime import datetime
 
