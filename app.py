@@ -12,14 +12,15 @@ from main import build_profile
 from engine import run_matching as do_match, load_fund_list
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def warmup_cache():
-    """预热：启动时加载基金列表到缓存，只跑一次"""
+    """预热：启动时加载基金列表。失败不影响主流程。"""
     try:
         load_fund_list(force_refresh=True)
     except Exception:
         pass
     return True
+
 
 st.set_page_config(
     page_title="基金匹配器",
@@ -239,8 +240,11 @@ MULTI_SELECT_KEYS = {"money_mission", "preferred_sectors", "excludes"}
 
 
 def run():
-    # ---- 预热缓存 ----
-    _ = warmup_cache()
+    # ---- 预热 ----
+    try:
+        warmup_cache()
+    except Exception:
+        pass
 
     # ---- 头部 ----
     st.markdown('<div class="brand-id">一入向北</div>', unsafe_allow_html=True)
